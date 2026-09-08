@@ -39,3 +39,25 @@ notifications only. One query in `submit_notification` is that statement. The
 second lookup also made `claim_reference` in `detail` depend on a separate read
 that could, in a later repository, return `None` after the first read had already
 decided it was a duplicate — which would omit the reference WI-0151 AC-2 requires.
+
+## Gate observation (step 8)
+
+Pull request: https://github.com/Prajwal-coforge/claims-intake/pull/2
+
+Commit `087919f` added an unused `json` import so ruff would fail. GitHub Actions run
+https://github.com/Prajwal-coforge/claims-intake/actions/runs/34242513453 concluded
+**failure**. The `ruff` step failed the job. `mypy` and `pytest` were skipped, which
+is the job failing rather than continuing.
+
+What the merge box showed after that failure:
+
+- Check `checks` was marked failed.
+- `mergeStateStatus` was `UNSTABLE`.
+- `mergeable` remained `MERGEABLE`.
+- `GET /repos/Prajwal-coforge/claims-intake/branches/main/protection` returned 404
+  `Branch not protected`.
+
+The failing check was **marked**. It did **not** block the merge. That is a
+repository-configuration finding, not a defect in `checks.yaml`. No branch
+protection requires the check, so a red `checks` job does not prevent merging.
+This is reported rather than worked around.
