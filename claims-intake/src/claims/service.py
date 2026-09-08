@@ -7,13 +7,14 @@ stored either. It knows the rules.
 
 `evaluate_policy_exists` ships written. It is the pattern every other rule
 follows: take the notification and whatever it needs, decide, and return a
-`ValidationOutcome` that names the rule and carries the values the decision was
-made on. Nothing prints, nothing raises for an ordinary refusal, and nothing
-reaches for a status code, because a status code is a fact about HTTP and this
-module does not know about HTTP.
+refusal or nothing. Nothing prints, nothing raises for an ordinary refusal, and
+nothing reaches for a status code, because a status code is a fact about HTTP
+and this module does not know about HTTP.
 
-Day 3 assignment. Build the remaining rules test-first against
-`docs/api-contract.md` section 4.
+`evaluate_notification` takes a notification and a policy and returns
+`RuleFailure | None`. It performs no I/O. `submit_notification` resolves the
+policy, evaluates, checks for a duplicate, and records only if every rule
+passed.
 """
 
 from __future__ import annotations
@@ -154,12 +155,44 @@ def evaluate_policy_not_cancelled(
     return RuleFailure(rule="V-7", code="POLICY_CANCELLED")
 
 
-def evaluate_not_duplicate(
+def _detail_for(
+    failure: RuleFailure,
     notification: NotificationRequest,
-    repository: NotificationRepository,
-) -> RuleFailure | None:
-    """V-6. The loss must not already have been recorded."""
-    return None
+    policy: Policy,
+) -> dict[str, Any]:
+    """Operands named in contract section 6.2 for the refusing rule."""
+    if failure.rule == "V-2":
+        return {
+            "policy_number": notification.policy_number,
+            "loss_date": notification.loss_date,
+            "effective_date": policy.effective_date,
+        }
+    if failure.rule == "V-3":
+        return {
+            "policy_number": notification.policy_number,
+            "loss_date": notification.loss_date,
+            "expiry_date": policy.expiry_date,
+        }
+    if failure.rule == "V-4":
+        return {
+            "policy_number": notification.policy_number,
+            "estimated_amount": notification.estimated_amount,
+            "limit": policy.limit,
+        }
+    if failure.rule == "V-5":
+        return {
+            "policy_number": notification.policy_number,
+            "claim_type": notification.claim_type,
+            "permitted_claim_types": policy.permitted_claim_types,
+            "product": policy.product,
+        }
+    if failure.rule == "V-7":
+        return {
+            "policy_number": notification.policy_number,
+            "loss_date": notification.loss_date,
+            "cancellation_date": policy.cancellation_date,
+        }
+    return {}
 
 
 # Contract section 4.1. These are the rules that are pure functions of a
@@ -208,6 +241,39 @@ def submit_notification(
     Nothing is written before the decision is made. A notification is either
     recorded with a claim reference or it does not exist, and there is no state in
     between for a later reader to interpret.
+
+    `PolicyNotFound` is V-1. `PolicyLookupFailed` is not caught: it is not a rule
+    outcome, and the HTTP layer must see its `reason` intact (section 6.3).
     """
-    # Stub: same dummy refusal so tests fail on the expected rule and values.
-    return ValidationOutcome.refused(RuleFailure(rule="V-0", code="INTERNAL_ERROR"))
+    existence = evaluate_policy_exists(notification, policy_client)
+    if not existence.accepted:
+        return existence
+
+    # V-1 already proved the master holds this policy. This second read supplies
+    # the fields stages 2 through 4 compare against. A client that makes a network
+    # call should cache; that is the client's concern, not the rules'.
+    policy = Policy.from_record(policy_client.get_policy(notification.policy_number))
+
+    failure = evaluate_notification(notification, policy)
+    if failure is not None:
+        return ValidationOutcome.refused(
+            failure, **_detail_for(failure, notification, policy)
+        )
+
+    # Stage 5. Kept here so POLICY_RULES stays free of the repository.
+    existing = repository.find_matching(
+        notification.policy_number,
+        notification.loss_date,
+        notification.claim_type,
+    )
+    if existing is not None:
+        return ValidationOutcome.refused(
+            RuleFailure(rule="V-6", code="DUPLICATE_NOTIFICATION"),
+            policy_number=notification.policy_number,
+            loss_date=notification.loss_date,
+            claim_type=notification.claim_type,
+            claim_reference=existing.claim_reference,
+        )
+
+    recorded = repository.record(notification)
+    return ValidationOutcome.ok(recorded.claim_reference)
