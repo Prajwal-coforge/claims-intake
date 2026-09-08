@@ -18,12 +18,15 @@ Day 3 assignment. Build the remaining rules test-first against
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from claims.models import NotificationRequest, Policy, RuleFailure
 from claims.policy_client import PolicyClient, PolicyNotFound
 from claims.repository import NotificationRepository
+
+PolicyRule = Callable[[NotificationRequest, Policy], RuleFailure | None]
 
 
 @dataclass(frozen=True)
@@ -91,7 +94,9 @@ def evaluate_loss_after_inception(
     The boundary is stated in contract section 4.2 and in WI-0142 AC-3. A loss on
     the inception date is covered.
     """
-    return None
+    if notification.loss_date >= policy.effective_date:
+        return None
+    return RuleFailure(rule="V-2", code="LOSS_BEFORE_INCEPTION")
 
 
 def evaluate_loss_before_expiry(
@@ -99,7 +104,9 @@ def evaluate_loss_before_expiry(
     policy: Policy,
 ) -> RuleFailure | None:
     """V-3. The loss must not fall after the policy expiry date."""
-    return None
+    if notification.loss_date <= policy.expiry_date:
+        return None
+    return RuleFailure(rule="V-3", code="LOSS_AFTER_EXPIRY")
 
 
 def evaluate_amount_within_limit(
@@ -110,23 +117,41 @@ def evaluate_amount_within_limit(
 
     An amount equal to the limit is within cover, per contract section 4.2.
     """
-    return None
+    if notification.estimated_amount <= policy.limit:
+        return None
+    return RuleFailure(rule="V-4", code="AMOUNT_EXCEEDS_LIMIT")
 
 
 def evaluate_claim_type_covered(
     notification: NotificationRequest,
     policy: Policy,
 ) -> RuleFailure | None:
-    """V-5. The claim type must be permitted on the policy's product."""
-    return None
+    """V-5. The claim type must be permitted on the policy's product.
+
+    The claim type is already one of the five values in section 2.3, because a
+    value outside the vocabulary never leaves stage 0 (determination D-2). This
+    rule asks whether the product this policy is written on extends to that peril.
+    """
+    if notification.claim_type in policy.permitted_claim_types:
+        return None
+    return RuleFailure(rule="V-5", code="TYPE_NOT_COVERED")
 
 
 def evaluate_policy_not_cancelled(
     notification: NotificationRequest,
     policy: Policy,
 ) -> RuleFailure | None:
-    """V-7. Cover must not have been ended by cancellation before the loss."""
-    return None
+    """V-7. Cover must not have been ended by cancellation before the loss.
+
+    The comparison is strict: earlier than `cancellation_date` passes, equal
+    fails, later fails (WI-0158 AC-2). A `None` cancellation date is the only
+    representation of "not cancelled" and this rule does not apply to it
+    (WI-0158 AC-3).
+    """
+    cancellation_date = policy.cancellation_date
+    if cancellation_date is None or notification.loss_date < cancellation_date:
+        return None
+    return RuleFailure(rule="V-7", code="POLICY_CANCELLED")
 
 
 def evaluate_not_duplicate(
@@ -135,6 +160,24 @@ def evaluate_not_duplicate(
 ) -> RuleFailure | None:
     """V-6. The loss must not already have been recorded."""
     return None
+
+
+# Contract section 4.1. These are the rules that are pure functions of a
+# notification and a policy. They run in stage order, not identifier order:
+# stage 2 (V-7), stage 3 (V-2, V-3), stage 4 (V-4, V-5).
+#
+# V-1 is not here because it is a lookup against the policy master, not a
+# comparison on a policy field. V-6 is not here because it is a lookup against
+# the repository. Putting V-6 in this table would force evaluate_notification to
+# take a store, which would mix deciding with recording and would break the
+# C3 interface: evaluate_notification(notification, policy) -> RuleFailure | None.
+POLICY_RULES: tuple[PolicyRule, ...] = (
+    evaluate_policy_not_cancelled,
+    evaluate_loss_after_inception,
+    evaluate_loss_before_expiry,
+    evaluate_amount_within_limit,
+    evaluate_claim_type_covered,
+)
 
 
 def evaluate_notification(
@@ -148,9 +191,11 @@ def evaluate_notification(
     It is fixed by contract section 4.1 and by nothing else. If you find yourself
     choosing an order here, the contract is incomplete and the fix belongs there.
     """
-    # Stub: a dummy failure so both pass and refuse cases fail on their
-    # assertions rather than on a missing function or NotImplementedError.
-    return RuleFailure(rule="V-0", code="INTERNAL_ERROR")
+    for rule in POLICY_RULES:
+        failure = rule(notification, policy)
+        if failure is not None:
+            return failure
+    return None
 
 
 def submit_notification(
