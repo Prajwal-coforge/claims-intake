@@ -1,11 +1,17 @@
 # Claims Intake Service: API Contract
 
-Version 0.5. Owned by the claims intake team. Consumed by the claims portal team.
+Version 0.6. Owned by the claims intake team. Consumed by the claims portal team.
 
 Version 0.5 completes sections 4, 5 and 6, adds rules `V-6` and `V-7` (WI-0151 and
 WI-0158), replaces the ascending-identifier evaluation order of 0.4 with the staged order
 in 4.1, and records three determinations in 4.4. This is component C1 of the week's lab
 and is what Days 2, 3 and 4 are built against.
+
+Version 0.6 adds `NOT_FOUND` (404) to section 6.4. Adding a code is a compatible change
+under section 1. It exists because section 5.1 requires every response that is not 201 to
+carry the error envelope, and a request to a path this contract does not define is such a
+response. `NOT_FOUND` is distinct from `POLICY_NOT_FOUND`: one is the wrong URL (404), the
+other is a policy number the master does not hold (422).
 
 This document is the authority on what the service accepts, what it returns, and under what conditions it refuses. Where the code and this document disagree, the document is correct and the code is a defect.
 
@@ -555,9 +561,13 @@ produce, so they carry the section 5.1 envelope and are enumerated here.
 | ---------------------------------------------- | ------------------------ | ------ | --------------------------- |
 | `Content-Type` is not `application/json`       | `UNSUPPORTED_MEDIA_TYPE` | 415    | `received`, `expected`      |
 | A method other than `POST` on `/notifications` | `METHOD_NOT_ALLOWED`     | 405    | `method`, `allowed` (array) |
-| Any unhandled fault inside this service        | `INTERNAL_ERROR`         | 500    | `correlation_id`            |
+| A request to a path this contract does not define | `NOT_FOUND`              | 404    | none (`{}`)                 |
+| Any unhandled fault inside this service          | `INTERNAL_ERROR`         | 500    | `correlation_id`            |
 
 A `405` response also carries the HTTP `Allow` header, as the method requires.
+
+`NOT_FOUND` carries an empty `detail`. It is a statement about the request line, not about
+any policy. It is distinct from `POLICY_NOT_FOUND`, which is 422.
 
 `INTERNAL_ERROR` is the only code that does not correspond to a condition this contract
 describes, and that is its purpose: it exists so that no failure escapes the envelope. Its
@@ -567,8 +577,8 @@ retry.
 
 ### 6.5 Complete status set
 
-`201`, `400`, `405`, `409`, `415`, `422`, `500`, `502`, `503`, `504`. A status outside this
-set is a defect in the service.
+`201`, `400`, `404`, `405`, `409`, `415`, `422`, `500`, `502`, `503`, `504`. A status
+outside this set is a defect in the service.
 
 Invariants a caller may hold to:
 
