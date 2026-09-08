@@ -14,7 +14,7 @@ import uuid
 from collections.abc import Mapping
 from datetime import date
 from decimal import Decimal
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -73,6 +73,10 @@ def get_policy_client() -> PolicyClient:
 def get_repository() -> NotificationRepository:
     """The in-memory store this process writes. Tests override this dependency."""
     return _default_repository
+
+
+PolicyClientDep = Annotated[PolicyClient, Depends(get_policy_client)]
+RepositoryDep = Annotated[NotificationRepository, Depends(get_repository)]
 
 
 def _jsonable(value: object) -> object:
@@ -159,8 +163,8 @@ async def unhandled_exception_handler(
 @app.post("/notifications")
 async def post_notification(
     request: Request,
-    policy_client: PolicyClient = Depends(get_policy_client),
-    repository: NotificationRepository = Depends(get_repository),
+    policy_client: PolicyClientDep,
+    repository: RepositoryDep,
 ) -> JSONResponse:
     content_type = request.headers.get("content-type")
     if not _is_json_content_type(content_type):
