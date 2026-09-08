@@ -21,36 +21,36 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from claims.models import NotificationRequest, Policy, RecordedNotification
+from claims.models import NotificationRequest, Policy, RuleFailure
 from claims.policy_client import PolicyClient, PolicyNotFound
 from claims.repository import NotificationRepository
 
 
 @dataclass(frozen=True)
 class ValidationOutcome:
-    """The result of evaluating one rule, or of evaluating them all.
+    """The result of submitting a notification.
 
-    `passed` is the only thing a caller has to branch on. When it is false, `rule`
-    names the rule that decided it, `code` is the stable contract code, and
-    `detail` carries the values that produced the decision so that the person
-    reading the eventual error can see which input was wrong.
+    `accepted` is the only thing a caller has to branch on. When it is true,
+    `claim_reference` is the reference that was issued. When it is false,
+    `failure` names the rule and the contract code, and `detail` carries the
+    values the decision was made on.
 
     There is no status code here. Contract section 6 maps a code to a status, and
     that mapping is applied at the HTTP boundary.
     """
 
-    passed: bool
-    rule: str | None = None
-    code: str | None = None
+    accepted: bool
+    claim_reference: str | None = None
+    failure: RuleFailure | None = None
     detail: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def ok(cls) -> ValidationOutcome:
-        return cls(passed=True)
+    def ok(cls, claim_reference: str | None = None) -> ValidationOutcome:
+        return cls(accepted=True, claim_reference=claim_reference)
 
     @classmethod
-    def failed(cls, rule: str, code: str, **detail: Any) -> ValidationOutcome:
-        return cls(passed=False, rule=rule, code=code, detail=detail)
+    def refused(cls, failure: RuleFailure, **detail: Any) -> ValidationOutcome:
+        return cls(accepted=False, failure=failure, detail=detail)
 
 
 def evaluate_policy_exists(
@@ -75,9 +75,8 @@ def evaluate_policy_exists(
     try:
         policy_client.get_policy(notification.policy_number)
     except PolicyNotFound:
-        return ValidationOutcome.failed(
-            rule="V-1",
-            code="POLICY_NOT_FOUND",
+        return ValidationOutcome.refused(
+            RuleFailure(rule="V-1", code="POLICY_NOT_FOUND"),
             policy_number=notification.policy_number,
         )
     return ValidationOutcome.ok()
@@ -86,66 +85,84 @@ def evaluate_policy_exists(
 def evaluate_loss_after_inception(
     notification: NotificationRequest,
     policy: Policy,
-) -> ValidationOutcome:
+) -> RuleFailure | None:
     """V-2. The loss must not precede policy inception.
 
     The boundary is stated in contract section 4.2 and in WI-0142 AC-3. A loss on
     the inception date is covered.
     """
-    raise NotImplementedError("Day 3 assignment")
+    return None
 
 
 def evaluate_loss_before_expiry(
     notification: NotificationRequest,
     policy: Policy,
-) -> ValidationOutcome:
+) -> RuleFailure | None:
     """V-3. The loss must not fall after the policy expiry date."""
-    raise NotImplementedError("Day 3 assignment")
+    return None
 
 
 def evaluate_amount_within_limit(
     notification: NotificationRequest,
     policy: Policy,
-) -> ValidationOutcome:
+) -> RuleFailure | None:
     """V-4. The estimated amount must not exceed the policy limit.
 
     An amount equal to the limit is within cover, per contract section 4.2.
     """
-    raise NotImplementedError("Day 3 assignment")
+    return None
 
 
 def evaluate_claim_type_covered(
     notification: NotificationRequest,
     policy: Policy,
-) -> ValidationOutcome:
+) -> RuleFailure | None:
     """V-5. The claim type must be permitted on the policy's product."""
-    raise NotImplementedError("Day 3 assignment")
+    return None
+
+
+def evaluate_policy_not_cancelled(
+    notification: NotificationRequest,
+    policy: Policy,
+) -> RuleFailure | None:
+    """V-7. Cover must not have been ended by cancellation before the loss."""
+    return None
+
+
+def evaluate_not_duplicate(
+    notification: NotificationRequest,
+    repository: NotificationRepository,
+) -> RuleFailure | None:
+    """V-6. The loss must not already have been recorded."""
+    return None
 
 
 def evaluate_notification(
     notification: NotificationRequest,
-    policy_client: PolicyClient,
-    repository: NotificationRepository,
-) -> ValidationOutcome:
-    """Evaluate every rule and return the outcome the caller sees.
+    policy: Policy,
+) -> RuleFailure | None:
+    """Evaluate the policy-field rules and return the first failure, or None.
 
     A notification can violate several rules at once and the caller sees one
     reason, so the order this function evaluates in is a caller-visible behavior.
     It is fixed by contract section 4.1 and by nothing else. If you find yourself
     choosing an order here, the contract is incomplete and the fix belongs there.
     """
-    raise NotImplementedError("Day 3 assignment")
+    # Stub: a dummy failure so both pass and refuse cases fail on their
+    # assertions rather than on a missing function or NotImplementedError.
+    return RuleFailure(rule="V-0", code="INTERNAL_ERROR")
 
 
 def submit_notification(
     notification: NotificationRequest,
     policy_client: PolicyClient,
     repository: NotificationRepository,
-) -> RecordedNotification | ValidationOutcome:
+) -> ValidationOutcome:
     """Validate, and record only if every rule passed.
 
     Nothing is written before the decision is made. A notification is either
     recorded with a claim reference or it does not exist, and there is no state in
     between for a later reader to interpret.
     """
-    raise NotImplementedError("Day 3 assignment")
+    # Stub: same dummy refusal so tests fail on the expected rule and values.
+    return ValidationOutcome.refused(RuleFailure(rule="V-0", code="INTERNAL_ERROR"))
