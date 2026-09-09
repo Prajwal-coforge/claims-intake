@@ -32,8 +32,8 @@ INVALID_CASES: tuple[tuple[str, int, str], ...] = (
 
 LOOKUP_CASES: tuple[tuple[LookupFailureReason, int, str], ...] = (
     ("timeout", 504, "POLICY_MASTER_TIMEOUT"),
-    ("unreachable", 503, "POLICY_MASTER_UNAVAILABLE"),
-    ("unparsable", 502, "POLICY_MASTER_INVALID_RESPONSE"),
+    ("unreachable", 503, "POLICY_MASTER_UNREACHABLE"),
+    ("unparsable", 502, "POLICY_MASTER_UNPARSABLE"),
 )
 
 
@@ -108,10 +108,9 @@ def test_missing_required_field_returns_400_not_a_rule_code(http: TestClient) ->
     response = http.post("/notifications", json=payload("EDGE-08"))
     assert response.status_code == 400
     body = response.json()
-    assert body["code"] == "SCHEMA_INVALID"
-    assert "violations" in body["detail"]
-    fields = {item["field"] for item in body["detail"]["violations"]}
-    assert "estimated_amount" in fields
+    assert body["code"] == "MALFORMED_REQUEST"
+    assert body["detail"]["field"] == "estimated_amount"
+    assert body["detail"]["issue"]
 
 
 def test_extra_field_is_rejected_not_ignored(http: TestClient) -> None:
@@ -120,8 +119,8 @@ def test_extra_field_is_rejected_not_ignored(http: TestClient) -> None:
     response = http.post("/notifications", json=body)
     assert response.status_code == 400
     payload_body = response.json()
-    assert payload_body["code"] == "SCHEMA_INVALID"
-    assert payload_body["code"] != "recorded"
+    assert payload_body["code"] == "MALFORMED_REQUEST"
+    assert payload_body["detail"]["field"] == "policy_holder_name"
 
 
 def test_malformed_json_returns_400(http: TestClient) -> None:
@@ -131,8 +130,31 @@ def test_malformed_json_returns_400(http: TestClient) -> None:
         headers={"Content-Type": "application/json"},
     )
     assert response.status_code == 400
-    assert response.json()["code"] == "MALFORMED_JSON"
-    assert response.json()["detail"] == {}
+    body = response.json()
+    assert body["code"] == "MALFORMED_REQUEST"
+    assert body["detail"] == {"field": None, "issue": "body_not_json"}
+
+
+def test_claim_type_outside_vocabulary_is_malformed_not_type_not_covered(
+    http: TestClient,
+) -> None:
+    response = http.post("/notifications", json=payload("EDGE-11"))
+    assert response.status_code == 400
+    assert response.json()["code"] == "MALFORMED_REQUEST"
+
+
+def test_amount_with_wrong_scale_is_malformed(http: TestClient) -> None:
+    response = http.post("/notifications", json=payload("EDGE-12"))
+    assert response.status_code == 400
+    assert response.json()["code"] == "MALFORMED_REQUEST"
+
+
+def test_empty_policy_number_is_malformed(http: TestClient) -> None:
+    body: dict[str, Any] = payload("VALID-01")
+    body["policy_number"] = ""
+    response = http.post("/notifications", json=body)
+    assert response.status_code == 400
+    assert response.json()["code"] == "MALFORMED_REQUEST"
 
 
 @pytest.mark.parametrize(
@@ -154,8 +176,6 @@ def test_policy_lookup_failed_returns_distinct_5xx(
     assert body["code"] == code
     assert body["detail"]["reason"] == reason
     assert body["detail"]["dependency"] == "policy_master"
-    assert "correlation_id" in body["detail"]
-    assert isinstance(body["detail"]["retryable"], bool)
     # A lookup failure is not an absent policy.
     assert body["code"] != "POLICY_NOT_FOUND"
     assert response.status_code >= 500

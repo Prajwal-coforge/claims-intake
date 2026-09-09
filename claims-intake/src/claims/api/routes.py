@@ -10,7 +10,6 @@ Day 4 lab. Implement against `docs/api-contract.md` sections 5 and 6.
 from __future__ import annotations
 
 import json
-import uuid
 from collections.abc import Mapping
 from datetime import date
 from decimal import Decimal
@@ -19,7 +18,6 @@ from typing import Annotated, Any
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
-from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from claims.models import ErrorCode, NotificationRequest
 from claims.policy_client import (
@@ -40,8 +38,7 @@ _default_policy_client: PolicyClient = StubPolicyClient()
 _default_repository = NotificationRepository()
 
 CODE_STATUS: dict[ErrorCode, int] = {
-    "MALFORMED_JSON": 400,
-    "SCHEMA_INVALID": 400,
+    "MALFORMED_REQUEST": 400,
     "POLICY_NOT_FOUND": 422,
     "LOSS_BEFORE_INCEPTION": 422,
     "LOSS_AFTER_EXPIRY": 422,
@@ -50,18 +47,14 @@ CODE_STATUS: dict[ErrorCode, int] = {
     "DUPLICATE_NOTIFICATION": 409,
     "POLICY_CANCELLED": 422,
     "POLICY_MASTER_TIMEOUT": 504,
-    "POLICY_MASTER_UNAVAILABLE": 503,
-    "POLICY_MASTER_INVALID_RESPONSE": 502,
-    "UNSUPPORTED_MEDIA_TYPE": 415,
-    "METHOD_NOT_ALLOWED": 405,
-    "NOT_FOUND": 404,
-    "INTERNAL_ERROR": 500,
+    "POLICY_MASTER_UNREACHABLE": 503,
+    "POLICY_MASTER_UNPARSABLE": 502,
 }
 
-LOOKUP_OUTCOME: dict[LookupFailureReason, tuple[ErrorCode, int, bool]] = {
-    "timeout": ("POLICY_MASTER_TIMEOUT", 504, True),
-    "unreachable": ("POLICY_MASTER_UNAVAILABLE", 503, True),
-    "unparsable": ("POLICY_MASTER_INVALID_RESPONSE", 502, False),
+LOOKUP_CODE: dict[LookupFailureReason, ErrorCode] = {
+    "timeout": "POLICY_MASTER_TIMEOUT",
+    "unreachable": "POLICY_MASTER_UNREACHABLE",
+    "unparsable": "POLICY_MASTER_UNPARSABLE",
 }
 
 
@@ -93,71 +86,33 @@ def _detail_json(detail: Mapping[str, Any]) -> dict[str, Any]:
     return {key: _jsonable(value) for key, value in detail.items()}
 
 
-def _envelope(
-    code: ErrorCode,
-    message: str,
-    detail: Mapping[str, Any],
-    *,
-    headers: dict[str, str] | None = None,
-) -> JSONResponse:
+def _envelope(code: ErrorCode, message: str, detail: Mapping[str, Any]) -> JSONResponse:
     return JSONResponse(
         status_code=CODE_STATUS[code],
         content={"code": code, "message": message, "detail": _detail_json(detail)},
-        headers=headers,
     )
 
 
-def _violations_from(error: ValidationError) -> list[dict[str, str]]:
-    violations: list[dict[str, str]] = []
-    for item in error.errors():
-        loc = item.get("loc", ())
-        field = ".".join(str(part) for part in loc) or "(root)"
-        violations.append({"field": field, "problem": str(item.get("msg", "invalid"))})
-    return violations
+def _malformed_request_detail(error: ValidationError) -> dict[str, Any]:
+    """Section 5.2: `field` is the one that could not be interpreted, `issue` why.
 
-
-def _is_json_content_type(content_type: str | None) -> bool:
-    if content_type is None:
-        return False
-    media_type = content_type.split(";", 1)[0].strip().lower()
-    return media_type == "application/json"
-
-
-@app.exception_handler(StarletteHTTPException)
-async def http_exception_handler(
-    request: Request, exc: StarletteHTTPException
-) -> JSONResponse:
-    if exc.status_code == 405:
-        return _envelope(
-            "METHOD_NOT_ALLOWED",
-            "Method not allowed on this path.",
-            {"method": request.method, "allowed": ["POST"]},
-            headers={"Allow": "POST"},
-        )
-    if exc.status_code == 404:
-        return _envelope(
-            "NOT_FOUND",
-            "No resource exists at this path.",
-            {},
-        )
-    return _envelope(
-        "INTERNAL_ERROR",
-        "An unexpected error occurred.",
-        {"correlation_id": uuid.uuid4().hex},
-    )
-
-
-@app.exception_handler(Exception)
-async def unhandled_exception_handler(
-    request: Request, exc: Exception
-) -> JSONResponse:
-    if isinstance(exc, StarletteHTTPException):
-        return await http_exception_handler(request, exc)
-    return _envelope(
-        "INTERNAL_ERROR",
-        "An unexpected error occurred.",
-        {"correlation_id": uuid.uuid4().hex},
-    )
+    Only the first violation is reported. Section 2.4 refuses the whole request
+    on the first problem found; it does not accumulate every field at fault.
+    """
+    errors = error.errors()
+    if not errors:
+        return {"field": None, "issue": "uninterpretable"}
+    err = errors[0]
+    loc = err.get("loc", ())
+    field = str(loc[0]) if loc else None
+    err_type = str(err.get("type", ""))
+    if err_type == "missing":
+        issue = "required_field_absent"
+    elif err_type == "extra_forbidden":
+        issue = "unknown_field"
+    else:
+        issue = err_type
+    return {"field": field, "issue": issue}
 
 
 @app.post("/notifications")
@@ -166,53 +121,33 @@ async def post_notification(
     policy_client: PolicyClientDep,
     repository: RepositoryDep,
 ) -> JSONResponse:
-    content_type = request.headers.get("content-type")
-    if not _is_json_content_type(content_type):
-        return _envelope(
-            "UNSUPPORTED_MEDIA_TYPE",
-            "Content-Type must be application/json.",
-            {"received": content_type, "expected": "application/json"},
-        )
-
     raw = await request.body()
     try:
         parsed: object = json.loads(raw)
     except json.JSONDecodeError:
         return _envelope(
-            "MALFORMED_JSON",
-            "The request body is not valid JSON.",
-            {},
-        )
-    if not isinstance(parsed, dict):
-        return _envelope(
-            "MALFORMED_JSON",
-            "The request body must be a JSON object.",
-            {},
+            "MALFORMED_REQUEST",
+            "The request could not be interpreted.",
+            {"field": None, "issue": "body_not_json"},
         )
 
     try:
         notification = NotificationRequest.model_validate(parsed)
     except ValidationError as error:
-        violations = _violations_from(error)
         return _envelope(
-            "SCHEMA_INVALID",
+            "MALFORMED_REQUEST",
             "The request could not be interpreted.",
-            {"violations": violations},
+            _malformed_request_detail(error),
         )
 
     try:
         outcome = submit_notification(notification, policy_client, repository)
     except PolicyLookupFailed as error:
-        code, _status, retryable = LOOKUP_OUTCOME[error.reason]
+        code = LOOKUP_CODE[error.reason]
         return _envelope(
             code,
             "The policy master did not produce a usable answer.",
-            {
-                "dependency": "policy_master",
-                "reason": error.reason,
-                "retryable": retryable,
-                "correlation_id": uuid.uuid4().hex,
-            },
+            {"dependency": "policy_master", "reason": error.reason},
         )
 
     if outcome.accepted:
@@ -227,21 +162,7 @@ async def post_notification(
 
 
 def _refusal(outcome: ValidationOutcome) -> JSONResponse:
-    if outcome.failure is None:
-        return _envelope(
-            "INTERNAL_ERROR",
-            "An unexpected error occurred.",
-            {"correlation_id": uuid.uuid4().hex},
-        )
+    assert outcome.failure is not None
     code = outcome.failure.code
-    if code not in CODE_STATUS:
-        return _envelope(
-            "INTERNAL_ERROR",
-            "An unexpected error occurred.",
-            {"correlation_id": uuid.uuid4().hex},
-        )
-    return _envelope(
-        code,
-        "The notification was refused.",
-        outcome.detail,
-    )
+    assert code in CODE_STATUS
+    return _envelope(code, "The notification was refused.", outcome.detail)

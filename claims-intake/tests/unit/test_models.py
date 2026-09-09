@@ -1,6 +1,6 @@
 """Unit tests for the request and policy boundary models.
 
-Names use contract vocabulary: V-0, SCHEMA_INVALID constraints, and the field
+Names use contract vocabulary: section 2.2/2.4 constraints, and the field
 names in section 2.2. A payload that raises here never reaches a rule.
 """
 
@@ -348,7 +348,7 @@ def test_policy_accepts_a_present_cancellation_date() -> None:
 def test_policy_rejects_structurally_invalid_records(
     record: dict[str, object], field: str
 ) -> None:
-    """A record the service cannot use is a POLICY_MASTER_INVALID_RESPONSE, not a rule failure."""
+    """A record the service cannot use is a POLICY_MASTER_UNPARSABLE, not a rule failure."""
     with pytest.raises(ValidationError) as exc_info:
         Policy.model_validate(record)
     assert field in _field_from_errors(exc_info.value)

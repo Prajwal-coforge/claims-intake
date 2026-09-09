@@ -35,15 +35,14 @@ CLAIM_TYPE_VOCABULARY: tuple[ClaimType, ...] = get_args(ClaimType)
 
 # Section 4: the rule identifiers. Section 4.1 is explicit that these are
 # permanent labels and carry no information about evaluation order.
-RuleId = Literal["V-0", "V-1", "V-2", "V-3", "V-4", "V-5", "V-6", "V-7"]
+RuleId = Literal["V-1", "V-2", "V-3", "V-4", "V-5", "V-6", "V-7"]
 
 # Section 6: every code the service can return. `RuleId` and `ErrorCode` are
 # separate types rather than both being `str` so that the type checker refuses a
 # rule identifier where a code is expected, which is the whole reason RuleFailure
 # has two fields instead of one.
 ErrorCode = Literal[
-    "MALFORMED_JSON",
-    "SCHEMA_INVALID",
+    "MALFORMED_REQUEST",
     "POLICY_NOT_FOUND",
     "LOSS_BEFORE_INCEPTION",
     "LOSS_AFTER_EXPIRY",
@@ -52,12 +51,8 @@ ErrorCode = Literal[
     "DUPLICATE_NOTIFICATION",
     "POLICY_CANCELLED",
     "POLICY_MASTER_TIMEOUT",
-    "POLICY_MASTER_UNAVAILABLE",
-    "POLICY_MASTER_INVALID_RESPONSE",
-    "UNSUPPORTED_MEDIA_TYPE",
-    "METHOD_NOT_ALLOWED",
-    "NOT_FOUND",
-    "INTERNAL_ERROR",
+    "POLICY_MASTER_UNREACHABLE",
+    "POLICY_MASTER_UNPARSABLE",
 ]
 
 CONTRACT_ERROR_CODES: tuple[ErrorCode, ...] = get_args(ErrorCode)
@@ -67,20 +62,20 @@ CONTRACT_ERROR_CODES: tuple[ErrorCode, ...] = get_args(ErrorCode)
 # ClaimRecord.
 ClaimReference = Annotated[str, Field(pattern=r"^CLM-\d{4}-\d{6}$")]
 
-# Section 4.3: the JSON numeral form money is carried in. Any number of decimal
-# places matches here, because a scale that is too fine is violation 7 rather than
-# violation 2, and the two are reported differently.
+# Section 2.2: estimated_amount is a decimal. Any number of decimal places
+# matches here; the exact-two-places constraint is enforced by `Field` below so
+# the two failure reasons (wrong type vs. wrong scale) are reported differently.
 _DECIMAL_NUMERAL = re.compile(r"-?[0-9]+(\.[0-9]+)?")
 
 
 def _decimal_from_json_string(value: object) -> object:
-    """Accept money only in the form section 4.3 fixes: a JSON string.
+    """Accept money only in the form section 2.2 fixes: a JSON string.
 
-    JSON has no decimal primitive, so section 4.3 carries money as a string and
-    makes a JSON number the wrong type under violation 2. That is not pedantry
-    about notation. A JSON number is read as a binary float, and this value is the
-    operand `V-4` compares against the policy `limit`, so accepting one would make
-    a boundary comparison depend on how the caller happened to write the figure.
+    JSON has no decimal primitive, so section 2.2 carries money as a string and
+    makes a JSON number the wrong type. That is not pedantry about notation. A
+    JSON number is read as a binary float, and this value is the operand `V-4`
+    compares against the policy `limit`, so accepting one would make a boundary
+    comparison depend on how the caller happened to write the figure.
 
     A `Decimal` passes through because it is already exact; that is the form the
     rule layer and the tests construct. Everything else, `float` and `int`
@@ -95,8 +90,7 @@ def _decimal_from_json_string(value: object) -> object:
     raise ValueError("must be a JSON string holding a decimal numeral, not a JSON number")
 
 
-# Section 2.2 and 4.3 violation 8 / determination D-3: greater than zero, at most
-# two decimal places, never rounded.
+# Section 2.2 / 4: greater than zero, at most two decimal places, never rounded.
 EstimatedAmount = Annotated[
     Decimal,
     BeforeValidator(_decimal_from_json_string),
@@ -107,8 +101,8 @@ EstimatedAmount = Annotated[
 def _reject_blank_policy_number(value: str) -> str:
     """Refuse empty or whitespace-only identifiers without changing the value.
 
-    Section 4.3 violation 4 rejects a blank `policy_number`. Determination D-1
-    forbids trimming: a value of `" MOT-4471"` must reach V-1 as sent, not as
+    Section 4 rejects a blank `policy_number`. The exact-match rule forbids
+    trimming: a value of `" MOT-4471"` must reach V-1 as sent, not as
     `"MOT-4471"`. Returning the original string keeps that promise.
     """
     if value.strip() == "":
@@ -116,7 +110,7 @@ def _reject_blank_policy_number(value: str) -> str:
     return value
 
 
-# StrictStr so a JSON number is SCHEMA_INVALID (section 4.3.2), not silently
+# StrictStr so a JSON number is MALFORMED_REQUEST (section 2.4), not silently
 # coerced into an identifier the caller never typed.
 PolicyNumber = Annotated[
     StrictStr, Field(min_length=1), AfterValidator(_reject_blank_policy_number)
@@ -161,10 +155,10 @@ class Policy(BaseModel):
     effective_date: date
     expiry_date: date
     cancellation_date: date | None
-    # Section 4.3 fixes money as a JSON string on both sides of the `V-4`
+    # Section 2.2 fixes money as a JSON string on both sides of the `V-4`
     # comparison, so the policy master's `limit` is held to the same form. A master
     # that sends a JSON number fails to parse and becomes
-    # POLICY_MASTER_INVALID_RESPONSE (section 6.3), which is the correct answer: a
+    # POLICY_MASTER_UNPARSABLE (section 6), which is the correct answer: a
     # float limit would make the boundary comparison inexact.
     limit: Annotated[Decimal, BeforeValidator(_decimal_from_json_string)]
     permitted_claim_types: tuple[ClaimType, ...]
@@ -177,8 +171,8 @@ class Policy(BaseModel):
         this service does not own (section 1) and its `permitted_claim_types` is a
         tuple of arbitrary strings. Narrowing those to the section 2.3 vocabulary
         is a parse of foreign data: a peril this contract does not define means the
-        master answered with something the service cannot use, which section 6.3
-        reports as POLICY_MASTER_INVALID_RESPONSE rather than accepting quietly.
+        master answered with something the service cannot use, which section 6
+        reports as POLICY_MASTER_UNPARSABLE rather than accepting quietly.
         """
         return cls.model_validate(
             {
