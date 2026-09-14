@@ -1,0 +1,45 @@
+# Pipeline runs automatically on every branch push and on merge requests.
+# No manual trigger is required.
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+
+stages:
+  - build
+  - test
+
+default:
+  image: python:3.9
+
+# Build must succeed before any test-stage job starts.
+# `needs` makes that dependency explicit (not just stage order).
+build:
+  stage: build
+  script:
+    - python -m venv .venv
+    - source .venv/bin/activate
+    - pip install --upgrade pip
+    - pip install -r requirements.txt
+  artifacts:
+    paths:
+      - .venv/
+    expire_in: 1 hour
+
+test:
+  stage: test
+  needs:
+    - job: build
+      artifacts: true
+  script:
+    - source .venv/bin/activate
+    - PYTHONPATH=StatusTracker pytest StatusTracker/tests -v
+
+check_formatting:
+  stage: test
+  needs:
+    - job: build
+      artifacts: true
+  script:
+    - source .venv/bin/activate
+    - flake8 StatusTracker
